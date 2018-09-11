@@ -2,7 +2,7 @@
 
 Specification for providing the [bpmux abstractions](https://github.com/AljoschaMeyer/bpmux) over an ordered, reliable, bidirectional communication channel, such as tcp or unix domain sockets.
 
-bpmux/rel assigns and 32 bit ids to requests, sinks, streams and duplexes, so that payloads can be "routed" to the correct "destination". A single endpoint has full control over the ids it assigns, it does not need to take into account any ids that have been assigned by the other endpoint. The only requirements are:
+bpmux/rel assigns 32 bit ids to requests, sinks, streams and duplexes, so that payloads can be "routed" to the correct "destination". A single endpoint has full control over the ids it assigns, it does not need to take into account any ids that have been assigned by the other endpoint. The only requirements are:
 
 - An endpoint may not send a request with an id which has been used on a previous request from this endpoint that has been neither responded to, nor cancelled, nor closed.
 - An endpoint may not create a sink with an id of any other currently open sink/stream/duplex that has been opened by this endpoint.
@@ -76,7 +76,7 @@ If `id == 3`, the chunk is a heartbeat pong for a request. The `len ^ 2` bytes f
 
 Send a request to the peer.
 
-The `2 ^ id` bytes following the tag are an integer that serves as the id of the request.
+If `id != 3`, the `2 ^ id` bytes following the tag are an integer that serves as the id of the request.
 
 The `2 ^ len` bytes following the request id bytes are an unsigned integer indicating the length of the payload.
 
@@ -86,7 +86,7 @@ After the `len` bytes, place that many bytes of payload. This consumes as much t
 
 Send a response to a request.
 
-The `2 ^ req` bytes following the tag are an integer specifying the id of the request you are responding to.
+If `id != 3`, the `2 ^ req` bytes following the tag are an integer specifying the id of the request you are responding to.
 
 The `2 ^ len` bytes following the request id bytes are an unsigned integer indicating the length of the payload.
 
