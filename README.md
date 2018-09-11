@@ -178,6 +178,6 @@ If `sink == 3`, the chunk acknowledges a cancellation on a stream opened by this
 
 Handles heartbeats on streams. If `pong` is `0`, this is a ping, else a pong. If `peer` is `0`, `stream` refers to a stream opened by this endpoint, else `stream` refers to a stream opened by the peer.
 
-If `sink == 3`, this refers to the top-level. Else, the `2 ^ sink` bytes following the tag specify the id of the stream to cancel.
+If `sink == 3`, this refers to the top-level. Else, the `2 ^ sink` bytes following the tag specify the id of the stream to which the hearbeat applies.
 
 If `peer` is `1`, `sink` may not be `3`.
