@@ -12,7 +12,7 @@ bpmux/rel transmits data in chunks. Each chunk is preceded by a tag that indicat
 
 There are various ways of sending invalid chunks, including but not limited to: Disrespecting the credit limit, responding to nonexistent requests, sending messages down nonexistent sinks, acknowledging nonexistent cancellations/closings, etc. A conforming implementation can not produce invalid chunks accidentally. Whenever an endpoint receives an invalid chunk, it should abort the connection (without signaling any errors or closing and cancelling the top-level).
 
-Conceptually, each chunk maps to a concept from the bpmux specification. There are chunks to open sinks/streams/duplexes, there are chunks to send messages/requests/responses, there are chunks for giving credit and sending/answering heartbeat signals, and there are chunks to cancel and close things. To avoid id ambiguity, there are specialized chunks for dealing with sinks/streams created by this endpoint and for dealing with sinks/streams created by the peer. And finally, there is the need to acknowledge cancellations and closings to avoid race conditions.
+Conceptually, each chunk maps to a concept from the bpmux specification. There are chunks to open sinks/streams/duplexes, there are chunks to send messages/requests/responses, there are chunks for giving credit and sending/answering heartbeat signals, and there are chunks to cancel and close things. To avoid id ambiguity, there are specialized chunks for dealing with sinks/streams created by this endpoint and for dealing with sinks/streams created by the peer. And finally, there is the need to acknowledge responses, cancellations and closings to avoid race conditions.
 
 To partition data into arbitrarily small batches, there is a mechanism to put any payload-carrying chunk into *partial* mode. When entering partial mode, the total size of the payload is specified. All further matching chunks then contribute to the payload until it has been fully sent, at which point partial mode is automatically disabled.
 
@@ -52,7 +52,7 @@ The `2 ^ len` bytes following the duplex id bytes are an unsigned integer indica
 
 After the `len` bytes, place that many bytes of payload. This consumes as much top-level credit.
 
-If `id == 3`, the chunk is a heartbeat ping for a request. The `len ^ 2` bytes following the tag specify the id of the request for which to send the ping. `len` may not be 3.
+If `id == 3`, the chunk is a heartbeat ping for a response. The `len ^ 2` bytes following the tag specify the id of the response for which to send the ping. `len` may not be 3.
 
 ### `Msg(sink: uint2_t, len: uint2_t)`, type nibble: 6 (`0b0110`)
 
@@ -70,7 +70,7 @@ Send a message down a sink that was opened by the peer.
 
 If `sink != 3`, this uses the same encoding as the regular `Msg` chunk.
 
-If `id == 3`, the chunk is a heartbeat pong for a request. The `len ^ 2` bytes following the tag specify the id of the request for which to send the pong. `len` may not be 3.
+If `id == 3`, the chunk is a heartbeat pong for a response. The `len ^ 2` bytes following the tag specify the id of the response for which to send the pong. `len` may not be 3.
 
 ### `Req(id: uint2_t, len: uint2_t)`, type nibble: 8 (`0b1000`)
 
@@ -84,13 +84,15 @@ After the `len` bytes, place that many bytes of payload. This consumes as much t
 
 ### `Res(req: uint2_t, len: uint2_t)`, type nibble: 9 (`0b1001`)
 
-Send a response to a request.
+Send a response to a request. Note that the endpoint issuing this chunk can not consider the request fully processed (for resource clean-up and id allocation) until it has received a confirmation from the peer. Otherwise, there would be race conditions with closings sent before the cancellation arrived.
 
 If `id != 3`, the `2 ^ req` bytes following the tag are an integer specifying the id of the request you are responding to.
 
 The `2 ^ len` bytes following the request id bytes are an unsigned integer indicating the length of the payload.
 
 After the `len` bytes, place that many bytes of payload. This consumes as much top-level credit.
+
+Upon receiving this chunk, a peer must acknowledge it.
 
 ### `Credit(stream: uint2_t, amount: uint2_t)`, type nibble: 14 (`0b1110`)
 
@@ -124,7 +126,9 @@ The `2 ^ len` bytes following the request id bytes are an unsigned integer indic
 
 After the `len` bytes, place that many bytes of payload. This consumes as much top-level credit.
 
-If `req == 3`, the chunk acknowledges the cancellation of a response previously awaited by the peer. The `2 ^ len` bytes following the tag specify the id of the request on which to acknowledge the cancellation. `len` may not be 3.
+Upon receiving this chunk, a peer must acknowledge it.
+
+If `req == 3`, the chunk acknowledges the cancellation of a response previously awaited by the peer, or it acknowledges that it received the response. The `2 ^ len` bytes following the tag specify the id of the request on which to acknowledge the cancellation. `len` may not be 3.
 
 ### `Close:Res(req: uint2_t, len: uint2_t)`, type nibble: 1 (`0b0001`)
 
@@ -135,6 +139,8 @@ If `req != 3`, the `2 ^ req` bytes following the tag are an integer specifying t
 The `2 ^ len` bytes following the request id bytes are an unsigned integer indicating the length of the payload.
 
 After the `len` bytes, place that many bytes of payload. This consumes as much top-level credit.
+
+Upon receiving this chunk, a peer must acknowledge it.
 
 If `req == 3`, the chunk acknowledges the closing of a request sent by this endpoint. The `2 ^ len` bytes following the tag specify the id of the request on which to acknowledge the closing. `len` may not be 3.
 
@@ -148,11 +154,15 @@ The `2 ^ len` bytes following the stream id bytes are an unsigned integer indica
 
 After the `len` bytes, place that many bytes of payload. This consumes as much top-level credit.
 
+Upon receiving this chunk, a peer must acknowledge it.
+
 ### `Cancel:Stream:Peer(stream: uint2_t, len: uint2_t)`, type nibble: 3 (`0b0011`)
 
 Cancel a stream that was opened by the peer.
 
 If `stream != 3`, this uses the same encoding as the regular `Cancel:Stream` chunk.
+
+Upon receiving this chunk, a peer must acknowledge it.
 
 If `stream == 3`, the chunk acknowledges the closing of a sink opened by this endpoint. The `2 ^ len` bytes following the tag specify the id of the sink on which to acknowledge the closing. `len` may not be 3. Note that it is neither necessary nor possible to acknowledge the closing of the top-level.
 
@@ -166,11 +176,15 @@ The `2 ^ len` bytes following the sink id bytes are an unsigned integer indicati
 
 After the `len` bytes, place that many bytes of payload. This consumes as much top-level credit.
 
+Upon receiving this chunk, a peer must acknowledge it.
+
 ### `Close:Sink:Peer(sink: uint2_t, len: uint2_t)`, type nibble: 5 (`0b0101`)
 
 Close a sink that was opened by the peer.
 
 If `sink != 3`, this uses the same encoding as the regular `Close:Sink` chunk.
+
+Upon receiving this chunk, a peer must acknowledge it.
 
 If `sink == 3`, the chunk acknowledges a cancellation on a stream opened by this endpoint. The `2 ^ len` bytes following the tag specify the id of the stream on which to acknowledge the cancellation. `len` may not be 3. Note that it is neither necessary nor possible to acknowledge cancellation of the top-level.
 
