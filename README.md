@@ -1,3 +1,5 @@
+Warning: This spec is not yet updated to the most recent [bpmux changes](https://github.com/AljoschaMeyer/bpmux/commit/fd2eb85f2bff162609363b4037d5f6098cbee82e). The update will most likely happen when I actually get to implement this.
+
 # bpmux/rel
 
 Specification for providing the [bpmux abstractions](https://github.com/AljoschaMeyer/bpmux) over an ordered, reliable, bidirectional communication channel, such as tcp or unix domain sockets.
