@@ -1,199 +1,158 @@
-Warning: This spec is not yet updated to the most recent [bpmux changes](https://github.com/AljoschaMeyer/bpmux/commit/fd2eb85f2bff162609363b4037d5f6098cbee82e). The update will most likely happen when I actually get to implement this.
-
 # bpmux/rel
 
 Specification for providing the [bpmux abstractions](https://github.com/AljoschaMeyer/bpmux) over an ordered, reliable, bidirectional communication channel, such as tcp or unix domain sockets.
 
-bpmux/rel assigns 32 bit ids to requests, sinks, streams and duplexes, so that payloads can be "routed" to the correct "destination". A single endpoint has full control over the ids it assigns, it does not need to take into account any ids that have been assigned by the other endpoint. The only requirements are:
-
-- An endpoint may not send a request with an id which has been used on a previous request from this endpoint that has been neither responded to, nor cancelled, nor closed.
-- An endpoint may not create a sink with an id of any other currently open sink/stream/duplex that has been opened by this endpoint.
-- The same holds for streams and duplexes.
-
-bpmux/rel transmits data in chunks. Each chunk is preceded by a tag that indicates how the following bytes are to be interpreted, and how many of the following bytes to interpret. The first four bits of the tag indicate its *type* (all types are listed in the following section). The remaining four bits are split up into the named arguments in the parentheses after the name of the type. Most of the time, these arguments do not store data, but only indicate how many of the following bytes contain the actual data.
-
-There are various ways of sending invalid chunks, including but not limited to: Disrespecting the credit limit, responding to nonexistent requests, sending messages down nonexistent sinks, acknowledging nonexistent cancellations/closings, etc. A conforming implementation can not produce invalid chunks accidentally. Whenever an endpoint receives an invalid chunk, it should abort the connection (without signaling any errors or closing and cancelling the top-level).
-
-Conceptually, each chunk maps to a concept from the bpmux specification. There are chunks to open sinks/streams/duplexes, there are chunks to send messages/requests/responses, there are chunks for giving credit and sending/answering heartbeat signals, and there are chunks to cancel and close things. To avoid id ambiguity, there are specialized chunks for dealing with sinks/streams created by this endpoint and for dealing with sinks/streams created by the peer. And finally, there is the need to acknowledge responses, cancellations and closings to avoid race conditions.
-
-To partition data into arbitrarily small batches, there is a mechanism to put any payload-carrying chunk into *partial* mode. When entering partial mode, the total size of the payload is specified. All further matching chunks then contribute to the payload until it has been fully sent, at which point partial mode is automatically disabled.
-
-## Chunk Types
-
-### `Sink(id: uint2_t, len: uint2_t)`, type nibble: 10 (`0b1010`)
-
-Open up a new sink.
-
-If `id != 3`, the `2 ^ id` bytes following the tag are an integer that serves as the id of the sink.
-
-The `2 ^ len` bytes following the sink id bytes are an unsigned integer indicating the length of the payload.
-
-After the `len` bytes, place that many bytes of payload. This consumes as much top-level credit.
-
-If `sink == 3`, the chunk acknowledges a cancellation on a stream opened by the peer. The `2 ^ len` bytes following the tag specify the id of the stream on which to acknowledge the cancellation. `len` may not be 3.
-
-### `Stream(id: uint2_t, len: uint2_t)`, type nibble: 11 (`0b1011`)
-
-Open up a new stream.
-
-If `id != 3`, the `2 ^ id` bytes following the tag are an integer that serves as the id of the stream.
-
-The `2 ^ len` bytes following the stream id bytes are an unsigned integer indicating the length of the payload.
-
-After the `len` bytes, place that many bytes of payload. This consumes as much top-level credit.
-
-If `stream == 3`, the chunk acknowledges the closing of a sink opened by the peer. The `2 ^ len` bytes following the tag specify the id of the sink on which to acknowledge the closing. `len` may not be 3.
-
-### `Duplex(id: uint2_t, len: unint2_t)`, type nibble: 12 (`0b1100`)
-
-Open up a new duplex.
-
-If `id != 3`, the `2 ^ id` bytes following the tag are an integer that serves as the id of the duplex.
-
-The `2 ^ len` bytes following the duplex id bytes are an unsigned integer indicating the length of the payload.
-
-After the `len` bytes, place that many bytes of payload. This consumes as much top-level credit.
-
-If `id == 3`, the chunk is a heartbeat ping for a response. The `len ^ 2` bytes following the tag specify the id of the response for which to send the ping. `len` may not be 3.
-
-### `Msg(sink: uint2_t, len: uint2_t)`, type nibble: 6 (`0b0110`)
-
-Send a message down a sink that was opened by this endpoint (or the top-level).
-
-If `sink == 3`, send the message to the top-level. Else, the `2 ^ sink` bytes following the tag are an integer specifying which sink to send the message to.
-
-The `2 ^ len` bytes following the sink id bytes (which may be zero bytes) are an unsigned integer indicating the length of the payload.
-
-After the `len` bytes, place that many bytes of payload. This consumes as much credit for the sink.
-
-### `Msg:Peer(sink: uint2_t, len: uint2_t)`, type nibble: 7 (`0b0111`)
-
-Send a message down a sink that was opened by the peer.
-
-If `sink != 3`, this uses the same encoding as the regular `Msg` chunk.
-
-If `id == 3`, the chunk is a heartbeat pong for a response. The `len ^ 2` bytes following the tag specify the id of the response for which to send the pong. `len` may not be 3.
-
-### `Req(id: uint2_t, len: uint2_t)`, type nibble: 8 (`0b1000`)
-
-Send a request to the peer.
-
-If `id != 3`, the `2 ^ id` bytes following the tag are an integer that serves as the id of the request.
-
-The `2 ^ len` bytes following the request id bytes are an unsigned integer indicating the length of the payload.
-
-After the `len` bytes, place that many bytes of payload. This consumes as much top-level credit.
-
-### `Res(req: uint2_t, len: uint2_t)`, type nibble: 9 (`0b1001`)
-
-Send a response to a request. Note that the endpoint issuing this chunk can not consider the request fully processed (for resource clean-up and id allocation) until it has received a confirmation from the peer. Otherwise, there would be race conditions with closings sent before the cancellation arrived.
-
-If `id != 3`, the `2 ^ req` bytes following the tag are an integer specifying the id of the request you are responding to.
-
-The `2 ^ len` bytes following the request id bytes are an unsigned integer indicating the length of the payload.
-
-After the `len` bytes, place that many bytes of payload. This consumes as much top-level credit.
-
-Upon receiving this chunk, a peer must acknowledge it.
-
-### `Credit(stream: uint2_t, amount: uint2_t)`, type nibble: 14 (`0b1110`)
-
-Give a certain amount of credit to a stream that was opened by this endpoint (or the top-level).
-
-If `stream == 3`, give the credit to the top-level. Else, the `2 ^ stream` bytes following the tag are an integer specifying which stream to give the credit.
-
-The `2 ^ amount` bytes following the stream id bytes (which may be zero bytes) are an unsigned integer indicating how much credit to give.
-
-### `Credit:Peer(stream: uint2_t, amount: uint2_t)`, type nibble: 15 (`0b1111`)
-
-Give a certain amount of credit to a stream that was opened by the peer.
-
-If `stream != 3`, this uses the same encoding as the regular `Credit` chunk.
-
-If `stream == 3`, the chunk activates partial mode for the next chunk following it. The `amount ^ 2` bytes following the tag specify the *total length* of the following payload.
-
-If the next chunk is a `Msg` or `Msg:Peer` chunk, the sink on which the message is sent is put into partial mode. All message payloads on that sink are considered part of a single message's payload, until the *total length* has been reached. At that point, the sink switches back to normal operation.
-
-If the next chunk is any other payload-carrying chunk, the entity specified by the combination of chunk type and id is put into partial mode, and all further chunks of matching type and id contribute to the payload, until the *total length* has been reached.
-
-Following the partial mode activation with a non-payload-carrying chunk is invalid. Writing partial payloads that exceed the *total length* is invalid.
-
-### `Cancel:Req(req: uint2_t, len: uint2_t)`, type nibble: 0 (`0b0000`)
-
-Cancel a request that originated from this endpoint. Note that the endpoint issuing this chunk can not consider the request cancelled (for resource clean-up and id allocation) until it has received a confirmation from the peer. Otherwise, there would be race conditions with responses sent before the cancellation arrived. This note applies to all `Cancel` chunks.
-
-If `req != 3`, the `2 ^ req` bytes following the tag are an integer specifying the id of the request you are cancelling.
-
-The `2 ^ len` bytes following the request id bytes are an unsigned integer indicating the length of the payload.
-
-After the `len` bytes, place that many bytes of payload. This consumes as much top-level credit.
-
-Upon receiving this chunk, a peer must acknowledge it.
-
-If `req == 3`, the chunk acknowledges the cancellation of a response previously awaited by the peer, or it acknowledges that it received the response. The `2 ^ len` bytes following the tag specify the id of the request on which to acknowledge the cancellation. `len` may not be 3.
-
-### `Close:Res(req: uint2_t, len: uint2_t)`, type nibble: 1 (`0b0001`)
-
-Close the response to a request that originated from the peer. This signifies that no response will be sent to the request. Note that the endpoint issuing this chunk can not consider the response closed (for resource clean-up and id allocation) until it has received a confirmation from the peer. Otherwise, there would be race conditions with cancellations sent before the closing arrived. This note applies to all `Close` chunks.
-
-If `req != 3`, the `2 ^ req` bytes following the tag are an integer specifying the id of the request whose response you are closing.
-
-The `2 ^ len` bytes following the request id bytes are an unsigned integer indicating the length of the payload.
-
-After the `len` bytes, place that many bytes of payload. This consumes as much top-level credit.
-
-Upon receiving this chunk, a peer must acknowledge it.
-
-If `req == 3`, the chunk acknowledges the closing of a request sent by this endpoint. The `2 ^ len` bytes following the tag specify the id of the request on which to acknowledge the closing. `len` may not be 3.
-
-### `Cancel:Stream(stream: uint2_t, len: uint2_t)`, type nibble: 2 (`0b0010`)
-
-Cancel a stream that was opened by this endpoint (or the top-level).
-
-If `stream == 3`, this cancels the top-level. Else, the `2 ^ stream` bytes following the tag specify the id of the stream to cancel.
-
-The `2 ^ len` bytes following the stream id bytes are an unsigned integer indicating the length of the payload.
-
-After the `len` bytes, place that many bytes of payload. This consumes as much top-level credit.
-
-Upon receiving this chunk, a peer must acknowledge it.
-
-### `Cancel:Stream:Peer(stream: uint2_t, len: uint2_t)`, type nibble: 3 (`0b0011`)
-
-Cancel a stream that was opened by the peer.
-
-If `stream != 3`, this uses the same encoding as the regular `Cancel:Stream` chunk.
-
-Upon receiving this chunk, a peer must acknowledge it.
-
-If `stream == 3`, the chunk acknowledges the closing of a sink opened by this endpoint. The `2 ^ len` bytes following the tag specify the id of the sink on which to acknowledge the closing. `len` may not be 3. Note that it is neither necessary nor possible to acknowledge the closing of the top-level.
-
-### `Close:Sink(sink: uint2_t, len: uint2_t)`, type nibble: 4 (`0b0100`)
-
-Close a sink that was opened by this endpoint (or the top-level).
-
-If `sink == 3`, this cancels the top-level. Else, the `2 ^ sink` bytes following the tag specify the id of the stream to cancel.
-
-The `2 ^ len` bytes following the sink id bytes are an unsigned integer indicating the length of the payload.
-
-After the `len` bytes, place that many bytes of payload. This consumes as much top-level credit.
-
-Upon receiving this chunk, a peer must acknowledge it.
-
-### `Close:Sink:Peer(sink: uint2_t, len: uint2_t)`, type nibble: 5 (`0b0101`)
-
-Close a sink that was opened by the peer.
-
-If `sink != 3`, this uses the same encoding as the regular `Close:Sink` chunk.
-
-Upon receiving this chunk, a peer must acknowledge it.
-
-If `sink == 3`, the chunk acknowledges a cancellation on a stream opened by this endpoint. The `2 ^ len` bytes following the tag specify the id of the stream on which to acknowledge the cancellation. `len` may not be 3. Note that it is neither necessary nor possible to acknowledge cancellation of the top-level.
-
-### `Hearbeat(pong: bool, peer: bool, stream: uint2_t)`, type nibble: 13 (`0b1101`)
-
-Handles heartbeats on streams. If `pong` is `0`, this is a ping, else a pong. If `peer` is `0`, `stream` refers to a stream opened by this endpoint, else `stream` refers to a stream opened by the peer.
-
-If `sink == 3`, this refers to the top-level. Else, the `2 ^ sink` bytes following the tag specify the id of the stream to which the hearbeat applies.
-
-If `peer` is `1`, `sink` may not be `3`.
+## General
+
+Bpmux/rel asigns 64 bit identifiers to all entities, so that packets can be "routed" to the correct entities. It also keeps track of whether an entity was created by the endpoint itself (*out-entities*) or by the peer (*in-entities*), to prevent trouble when both parties create entities with the same identifier concurrently.
+
+Data gets transmitted in chunks. Each chunk begins with a 1-byte *tag*, followed by a [VarU64](https://github.com/AljoschaMeyer/varu64-rs) encoding the identifier of an identity, followed by additional bytes whose interpretation depends on the tag. The tag consists of three bits for the *type*, followed by five bits of *flags*.
+
+The type indicates what kind of entity the identifier following the tag refers to:
+
+| bits | type        |
+|------|-------------|
+| 000  | Out-Request |
+| 001  | In-Request  |
+| 010  | Out-Sink    |
+| 011  | In-Sink     |
+| 100  | Out-Stream  |
+| 101  | In-Stream   |
+| 110  | Duplex      |
+| 111  | Partial     |
+
+The flags are (from fourth-most-significant to least significant bit):
+
+- `payload`
+- `credit`
+- `ping`
+- `end`
+- `ack-end`
+
+Unless noted otherwise:
+
+- identifiers are always unsigned 64 bit integers, and when transmitted, they are encoded as [VarU64](https://github.com/AljoschaMeyer/varu64-rs)s
+- payloads are byte strings of length up to 2^64 - 1, and are encoded as a VarU64 followed by that many bytes
+- credits are always unsigned 64 bit integers, and when transmitted, they are encoded as VarU64s
+- end-payloads work just like regular payloads, except they are indicated by the `end` flag
+- if multiple flags among `payload`, `credit` and `end` are set, the chunk contains the corresponding data in that order
+- protocol violations should be handled by immediately terminating the connection
+
+## State
+
+The state of an endpoint consists of a `State` as defined in the following code block:
+
+```
+type Entity = {
+  credit_out: U64,
+  credit_in: U64,
+  end_out: bool,
+  end_in: bool,
+  partial: U64,
+}
+
+type State = {
+  req_out: Map<U64, Entity>,
+  req_in: Map<U64, Entity>,
+  sink_out: Map<U64, Entity>,
+  sink_in: Map<U64, Entity>,
+  stream_out: Map<U64, Entity>,
+  stream_in: Map<U64, Entity>,
+}
+```
+
+The initial state consists of empty maps, except for sink_out and stream_out, both containing an entity with id 0, representing sink and stream halves of the top-level context. Initially, `credit_out`, `credit_in` and `partial` are set to zero, and their end flags are set to false.
+
+## Receiving Chunks
+
+This section describes how to update the state upon sending chunks with a type other than `Partial`. `Partial` chunks are described in a later section.
+
+The `type` of the chunk indicates which part of the state to operate upon (note that this is mirrored from what you might expect, since the type was set from the peer's perspective):
+
+| Chunk type  | Map of entities  |
+|-------------|------------------|
+| Out-Request | state.req_in     |
+| In-Request  | state.req_out    |
+| Out-Sink    | state.stream_in  |
+| In-Sink     | state.stream_out |
+| Out-Stream  | state.sink_in    |
+| In-Stream   | state.sink_out   |
+| Duplex      | special handling |
+
+Let `ent` be the result of looking up the chunk's identifier from the appropriate map in the state.
+
+If `ent` is not in the map, the identifier is zero, and the chunk type is one of `In-Sink`, `In-Stream` or `Duplex`: This is a protocol violation (you can't reopen the top-level context).
+
+Otherwise, if `ent` is not in the map:
+
+- if the chunk is of type `In-Request`, this is a protocol violation
+- create a new entry in the appropriate map with the chunk's identifier, with credits and `partial` set to zero, and the end flags set to false. `ent` now refers to the newly created entity.
+  - if the chunk is of type `Duplex`:
+    - if either the `sink_in` or the `stream_in` maps contain the identifier, this is a protocol violation
+    - else, create new identifies in both maps. `ent` now refers to the entity created in the `sink_in` map
+- if the `payload` flag is not set, this is a protocol violation
+  - else, subtract the payload length from `ent.credit_in`
+    - if an overflow occurs, this is a protocol violation
+    - if no overflow occurs, forward the payload to the application layer
+- if the chunk has the `credit` flag set, add the credit to `ent.credit_out`
+  - if an overflow occurs, this is a protocol violation
+- if the chunk has the `ping` flag set, forward the heartbeat ping to the application layer
+- if the chunk has the `end` flag set, subtract the end payload length from `ent.credit_in`
+  - if an overflow occurs, this is a protocol violation
+  - if no overflow occurs:
+    - forward the end payload to the application layer
+    - set `ent.end_in` to true
+    - send back an acknowledgement chunk (see below)
+- if the chunk has the `ack-end` flag set, this is a protocol violation
+
+If `ent` has already been in the map:
+
+- if the chunk has type `Duplex`, this is a protocol violation.
+- if the chunk has the `payload` flag set:
+  - if the chunk is not of type `In-Request`, `In-Sink` or `Out-Sink`, this is a protocol violation
+  - subtract the payload length from `ent.credit_in`
+    - if an overflow occurs, this is a protocol violation
+    - if no overflow occurs, forward the payload to the application layer
+  - if the chunk is of type `In-Request`, send back an acknowledgement chunk (see below)
+- if the chunk has the `credit` flag set, add the credit to `ent.credit_out`
+  - if an overflow occurs, this is a protocol violation
+- if the chunk has the `ping` flag set, forward the heartbeat ping to the application layer
+- if the chunk has the `end` flag set:
+  - if the chunk is of type `In-Request` and also has the `payload` flag set: this is a protocol violation
+  - if `ent.end_in` is already set to true, this is a protocol violation
+  - subtract the end payload length from `ent.credit_in`
+    - if an overflow occurs, this is a protocol violation
+    - if no overflow occurs:
+      - forward the end payload to the application layer
+      - if `ent.end_out` is set to true, remove the entity from the map
+      - else:
+        - set `ent.end_in` to true
+        - send back an acknowledgement chunk (see below)
+- if the chunk has the `ack-end` flag set:
+  - if any other flag is also set, this is a protocol violation
+  - if `ent.end_out` is set to false, this is a protocol violation
+  - remove the entity from the map
+- if no flags were set, the chunk does nothing. It should still be reported for heartbeat purposes (effectively, this is how the protocol encodes heartbeat pongs)
+- there is some special handling around receiving `In-Request` chunks:
+
+To send an acknowledgment chunk, send a chunk with the same identifier, no flags but the `ack-end` flag, and with the `type` derived by inverting "In" and "Out" as well as "Sink" and "Stream" (so that the peer matches it to the correct entity).
+
+## Sending Chunks
+
+To send a chunk, do the inverse of receiving a chunk. Send the data that makes the peer do what you want, according to the procedure of receiving chunks. In particular, don't do anything that results in protocol violations.
+
+When sending a chunk, update entities as follows:
+
+- if the `payload` flag is set, subtract the size of the payload from `ent.credit_out`
+  - if there is an overflow, you violated the protocol, don't do this
+- if the `credit` flag is set, add the amount of credit to `ent.credit_in`
+  - if there is an overflow, you violated the protocol, don't do this
+- if the `end` flag is set, subtract the size of the end-payload from `ent.credit_out`
+  - if there is an overflow, you violated the protocol, don't do this
+  - set `ent.end_out` to true
+
+## Partial Mode
+
+Chunks of type `Partial` work completely different then regular chunks. They are not followed by a VarU64 identifier, and the five remaining bits are not treated as flags. Instead, the two middle bits are ignored, and the three least significant bits are treated as an unsigned integer `length` between zero and seven. The tag is followed by `length + 1` many bytes encoding an big-endian unsigned integer, the `total_size`. If the `total_size` is zero, this is a protocol violation. If the the `total_size` is encoded in more bytes then needed (e.g. the value 42 encoded in two bytes rather than one byte), this is a protocol violation.
+
+The entity addressed by the chunk following the `Partial` chunk is put into *partial mode*, by setting the (possibly newly created) entity's `partial` value to the `total_size`. When receiving payloads for that entity, the payload is not directly handed to the application layer. Instead, the payload gets buffered and its size is subtracted from the `partial` value. If an overflow occurs, this is a protocol violation. Only when the `partial` value reaches exactly zero is the concatenation of all buffered payloads for that entity passed to the application layer. Interleaving regular payload and end payload on the same entity in partial mode is a protocol violation.
