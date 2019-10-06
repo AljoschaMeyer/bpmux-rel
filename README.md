@@ -2,6 +2,8 @@
 
 Specification for providing the [bpmux abstractions](https://github.com/AljoschaMeyer/bpmux) over an ordered, reliable, bidirectional communication channel, such as tcp or unix domain sockets.
 
+**Status: Deprecated in favor of https://github.com/AljoschaMeyer/bymux. Don't use this!**
+
 ## General
 
 Bpmux/rel asigns 64 bit identifiers to all entities, so that packets can be "routed" to the correct entities. It also keeps track of whether an entity was created by the endpoint itself (*out-entities*) or by the peer (*in-entities*), to prevent trouble when both parties create entities with the same identifier concurrently.
